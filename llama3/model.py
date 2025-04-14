@@ -37,6 +37,21 @@ class ModelArgs:
     max_seq_len: int = 2048
 
 
+LLAMA_MINI = ModelArgs(
+    dim=512,
+    n_layers=8,
+    n_heads=16,
+    n_kv_heads=8,
+    vocab_size=128256,
+    multiple_of=256,
+    ffn_dim_multiplier=1.5,
+    norm_eps=1e-5,
+    rope_theta=500000,
+    max_batch_size=32,
+    max_seq_len=512,
+)
+
+
 LLAMA_1B = ModelArgs(
     dim=2048,
     n_layers=16,
@@ -137,7 +152,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, freqs_cis, mask):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         # model_parallel_size = fs_init.get_model_parallel_world_size()
@@ -146,6 +161,9 @@ class Attention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
+
+        self.freqs_cis = freqs_cis
+        self.mask = mask
 
         # self.wq = ColumnParallelLinear(
         self.wq = torch.nn.Linear(
@@ -201,10 +219,13 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
-        freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
+        # start_pos: int,
+        # freqs_cis: torch.Tensor,
+        # mask: Optional[torch.Tensor],
     ):
+        self.freqs_cis = self.freqs_cis.to(x.device)
+        self.mask = self.mask.to(x.device) if self.mask is not None else None
+
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
@@ -212,7 +233,7 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=self.freqs_cis)
 
         # [NOTE] Disable KV cache during training.
 
@@ -242,8 +263,8 @@ class Attention(nn.Module):
             1, 2
         )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+        if self.mask is not None:
+            scores = scores + self.mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
@@ -300,10 +321,10 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.freqs_cis = freq_cis
+        self.freq_cis = freq_cis
         self.mask = mask
 
-        self.attention = Attention(args)
+        self.attention = Attention(args, self.freq_cis, self.mask)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -321,7 +342,7 @@ class TransformerBlock(nn.Module):
         # freqs_cis: torch.Tensor,
         # mask: Optional[torch.Tensor],
     ):
-        h = x + self.attention(self.attention_norm(x), 0, self.freqs_cis, self.mask)
+        h = x + self.attention(self.attention_norm(x))
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 

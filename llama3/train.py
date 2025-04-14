@@ -1,4 +1,4 @@
-from model import LLAMA_3B, Transformer
+from model import LLAMA_MINI, Transformer
 
 import os
 import argparse
@@ -21,7 +21,7 @@ class DummyLlamaDataset(Dataset):
 
     def __getitem__(self, idx):
         input_ids = torch.randint(0, self.vocab_size,(self.seq_len,)).long()
-        labels = torch.randint(0, self.vocab_size,(self.seq_len,)).long()
+        labels = torch.randn(self.seq_len,self.vocab_size)
         return input_ids, labels
 
 
@@ -52,10 +52,10 @@ def get_args():
 
 def join_layers(model):
     layers = [
-        model.tok_embeddings,
-        *model.layers,
-        model.norm,
-        model.output
+        model.tok_embeddings.to("cuda:0"),
+        *[layer.to("cuda:0") for layer in model.layers],
+        model.norm.to("cuda:0"),
+        model.output.to("cuda:0")
     ]
     return layers
 
@@ -65,14 +65,14 @@ def train_pipe(args, part='parameters'):
 
     seqlen = 32
 
-    net = Transformer(LLAMA_3B, seqlen).to("cuda:0")
+    net = Transformer(LLAMA_MINI, seqlen)
     net = PipelineModule(layers=join_layers(net),
                          loss_fn=torch.nn.CrossEntropyLoss(),
                          num_stages=args.pipeline_parallel_size,
                          partition_method=part,
                          activation_checkpoint_interval=0)
 
-    trainset = DummyLlamaDataset(128, seqlen, LLAMA_3B.vocab_size)
+    trainset = DummyLlamaDataset(128, seqlen, LLAMA_MINI.vocab_size)
 
     engine, _, _, _ = deepspeed.initialize(
         args=args,
