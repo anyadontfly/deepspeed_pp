@@ -1,7 +1,6 @@
-from model import LLAMA_MINI, Transformer
-
 import os
 import argparse
+from model import LLAMA_3B, Transformer
 
 import deepspeed
 from deepspeed.pipe import PipelineModule
@@ -65,14 +64,14 @@ def train_pipe(args, part='parameters'):
 
     seqlen = 32
 
-    net = Transformer(LLAMA_MINI, seqlen)
+    net = Transformer(LLAMA_3B, seqlen)
     net = PipelineModule(layers=join_layers(net),
                          loss_fn=torch.nn.CrossEntropyLoss(),
                          num_stages=args.pipeline_parallel_size,
                          partition_method=part,
                          activation_checkpoint_interval=0)
-
-    trainset = DummyLlamaDataset(128, seqlen, LLAMA_MINI.vocab_size)
+    
+    trainset = DummyLlamaDataset(128, seqlen, LLAMA_3B.vocab_size)
 
     engine, _, _, _ = deepspeed.initialize(
         args=args,
